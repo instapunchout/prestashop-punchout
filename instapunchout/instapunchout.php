@@ -59,10 +59,11 @@ class Instapunchout extends Module
                 array('server' => 'remote', 'position' => 'head', 'priority' => 140)
             );
         } else {
-            $this->context->controller->addJS(
+            return '<script type="text/javascript" src="/module/instapunchout/punchout?action=script"></script>';
+            /*$this->context->controller->addJS(
                 '/module/instapunchout/punchout?action=script',
                 false
-            );
+            );*/ 
         }
 
     }
