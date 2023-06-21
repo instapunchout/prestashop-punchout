@@ -102,7 +102,7 @@ class InstapunchoutPunchoutModuleFrontController extends ModuleFrontController
 	}
 
 
-	private function prepare_address($data, $customer): Address
+	private function prepare_address($data, $customer)
 	{
 		$id_country = Country::getByIso($data['country']);
 		if (!$id_country) {
@@ -284,7 +284,12 @@ class InstapunchoutPunchoutModuleFrontController extends ModuleFrontController
 		}
 		Hook::exec('actionBeforeAuthentication');
 		// set the user as logged in
-		$this->updateCustomer($customer);
+
+		if (method_exists($this->context, 'updateCustomer')) {
+			$this->context->updateCustomer($customer);
+		} else {
+			$this->updateCustomer($customer);
+		}
 		Hook::exec('actionAuthentication', ['customer' => $this->context->customer]);
 		// reset cart
 		CartRule::autoRemoveFromCart($this->context);
