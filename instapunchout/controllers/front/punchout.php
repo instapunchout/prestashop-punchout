@@ -16,7 +16,19 @@ class InstapunchoutPunchoutModuleFrontController extends ModuleFrontController
 			$action = $_GET['action'];
 		}
 		try {
-			if ($action == 'options.json') {
+			if ($action == 'debug') {
+				$res = Db::getInstance()->executeS(
+					"select * from " . _DB_PREFIX_ . "specific_price where id_customer='" . $_GET['id'] . "';"
+				);
+				echo json_encode($res);
+				exit;
+			} else if ($action == 'version') {
+				Db::getInstance()->execute(
+					"update " . _DB_PREFIX_ . "configuration set value='None' where name='PS_COOKIE_SAMESITE';"
+				);
+				echo "VERSION: 1.0.4";
+				exit;
+			} else if ($action == 'options.json') {
 				$this->options();
 			} else if ($action == 'script') {
 				$this->script();
@@ -61,14 +73,55 @@ class InstapunchoutPunchoutModuleFrontController extends ModuleFrontController
 
 					$customer = $this->prepare_customer($res);
 					$this->setCustomerAsLoggedIn($customer, $res['punchout_id']);
-					header('Location: /');
+					if (isset($res['redirect'])) {
+						header('Location: ' . $res['redirect']);
+					} else {
+						header('Location: /');
+					}
 					exit;
 				}
 			}
 		} catch (Exception $e) {
 			echo var_dump($e);
-			return;
+			exit;
 		}
+	}
+
+	private function search_products($ids)
+	{
+		return Db::getInstance()->executeS(
+			"select * from " . _DB_PREFIX_ . "product where id_product in (" . join($ids, ",") . ");"
+		);
+	}
+
+	private function copy_specific_prices($source_id, $target_id)
+	{
+		$db = Db::getInstance();
+		$res = $db->executeS(
+			"select * from " . _DB_PREFIX_ . "specific_price where id_customer='" . $target_id . "';"
+		);
+		if ($res !== false && empty($res)) {
+			$res = $db->executeS(
+				"select * from " . _DB_PREFIX_ . "specific_price where id_customer='" . $source_id . "';"
+			);
+			if (!$res) {
+				echo "Error: " . $db->getMsgError();
+				exit;
+			}
+			$new_array = [];
+			foreach ($res as $value) {
+				$value = json_decode(json_encode($value), true);
+				$value['id_customer'] = $target_id;
+				unset($value['id_specific_price']);
+				$new_array[] = $value;
+			}
+			$res = $db->insert('specific_price', $new_array);
+			if (!$res) {
+				echo "Error: " . $db->getMsgError();
+				exit;
+			}
+		}
+
 	}
 
 	private function prepare_customer($data)
@@ -87,16 +140,38 @@ class InstapunchoutPunchoutModuleFrontController extends ModuleFrontController
 			$customer->active = 1;
 
 			$customer->add();
-
-			$customer->cleanGroups();
-
-			// we add the guest customer in the default customer group
-			$customer->addGroups(array((int) Configuration::get('PS_CUSTOMER_GROUP')));
-
 		}
+
+		if (isset($data['properties']) && isset($data['properties']['groups']) && count($data['properties']['groups']) > 0) {
+			$groups = [];
+			foreach ($data['properties']['groups'] as $value) {
+				array_push($groups, (int) $value);
+			}
+			$customer->id_default_group = $groups[0];
+			$customer->updateGroup($groups);
+			$customer->id_default_group = $groups[0];
+			$query = "UPDATE `" . _DB_PREFIX_ . "customer` SET id_default_group = " . $groups[0] . " WHERE id_customer=" . $customer->id;
+			Db::getInstance()->Execute($query);
+		} else if (isset($data['group_id'])) {
+			$customer->id_default_group = $data['group_id'];
+			$customer->updateGroup([$data['group_id']]);
+			$customer->id_default_group = $data['group_id'];
+			$query = "UPDATE `" . _DB_PREFIX_ . "customer` SET id_default_group = " . $data['group_id'] . " WHERE id_customer=" . $customer->id;
+			Db::getInstance()->Execute($query);
+
+		} else if (!$exists) {
+			// we add the guest customer in the default customer group
+			$customer->updateGroup([]);
+		}
+
 		$customer = new Customer();
 
 		$exists = $customer->getByEmail($data['email'], null);
+
+		if (isset($data['profile_id'])) {
+			$this->copy_specific_prices($data['profile_id'], $customer->id);
+			$exists = $customer->getByEmail($data['email'], null);
+		}
 
 		return $customer;
 	}
@@ -110,7 +185,7 @@ class InstapunchoutPunchoutModuleFrontController extends ModuleFrontController
 			exit;
 		}
 		$id_state = State::getIdByIso($data['state']);
-		if (!$id_state) {
+		if (!$id_state && !empty($data['state'])) {
 			echo "Error: state not found " . $data['state'];
 			exit;
 		}
@@ -153,11 +228,14 @@ class InstapunchoutPunchoutModuleFrontController extends ModuleFrontController
 
 	private function options()
 	{
-		return [
+		$res = [
 			"carriers" => Carrier::getCarriers($this->context->language->id, true, false, false, null, Carrier::ALL_CARRIERS),
 			"order_states" => OrderState::getOrderStates($this->context->language->id),
-
+			"groups" => Group::getGroups($this->context->language->id),
 		];
+		header('Content-Type: application/json');
+		echo json_encode($res);
+		exit;
 	}
 
 	private function create_order($new_order)
@@ -191,9 +269,26 @@ class InstapunchoutPunchoutModuleFrontController extends ModuleFrontController
 
 		// Add the order details to the cart
 		$orderDetailsData = $new_order['order_details'];
+
+		$shop = Context::getContext()->shop;
 		foreach ($orderDetailsData as $orderDetailData) {
-			// $product = new Product($orderDetailData['id_product'], false, $this->context->language->id);
-			$cart->updateQty($orderDetailData['quantity'], $orderDetailData['id_product'], $orderDetailData['id_product_attribute'], false, 'up', 0, null, false);
+
+			$quantity = (int) $orderDetailData['quantity'];
+			$id_product = (int) $orderDetailData['id_product'];
+			$id_product_attribute = (int) $orderDetailData['id_product_attribute'];
+			$id_customization = (int) $orderDetailData['id_customization'];
+			$product = new Product($id_product, false, (int) Configuration::get('PS_LANG_DEFAULT'), $shop->id);
+			if (!Validate::isLoadedObject($product)) {
+				header('Content-Type: application/json');
+				echo json_encode(["error" => 'Failed to load product ' . $id_product]);
+				exit;
+			}
+			$res = $cart->updateQty($quantity, $id_product, $id_product_attribute, false, 'up', 0, null, false, true);
+			if ($res !== true) {
+				header('Content-Type: application/json');
+				echo json_encode(["error" => 'Failed to add item to cart ' . $id_product . ' with result: ' . $res]);
+				exit;
+			}
 			// $price = $orderDetailData['price'];
 			//v$cart->updatePrice($price, $orderDetailData['id_product'], $orderDetailData['id_product_attribute'], null, null, '', null, false);
 		}
@@ -226,10 +321,226 @@ class InstapunchoutPunchoutModuleFrontController extends ModuleFrontController
 		$order_detail = new OrderDetail(null, null, $this->context);
 		$order_detail->createList($order, $cart, $order->current_state, $order->product_list, 0, true, 1);
 
+
+		// check if isset and not empty
+		if (isset($new_order['comments']) && !empty($new_order['comments'])) {
+			$orderMessage = new Message();
+			$orderMessage->id_order = $order->id;
+			$orderMessage->message = $new_order['comments'];
+			$orderMessage->save();
+		}
+
+
+		// add order payment
+		$payment = new OrderPayment();
+		$payment->order_reference = Tools::substr($order->reference, 0, 9);
+		$payment->id_currency = $order->id_currency;
+		$payment->amount = $order->total_paid;
+		$payment->payment_method = $order->payment;
+		$payment->conversion_rate = $order->conversion_rate;
+		$payment->save();
+
+		Hook::exec('actionValidateOrder', [
+			'cart' => $cart,
+			'order' => $order,
+			'customer' => $customer,
+			'currency' => $order->id_currency,
+			'orderStatus' => $order->current_state,
+		]);
+
 		header('Content-Type: application/json');
 		echo json_encode($order);
 		exit;
 
+	}
+
+
+	public function updateQty(
+		$cart,
+		$quantity,
+		$id_product,
+		$id_product_attribute = null,
+		$id_customization = false,
+		$operator = 'up',
+		$id_address_delivery = 0,
+		Shop $shop = null,
+		$auto_add_cart_rule = true,
+		$skipAvailabilityCheckOutOfStock = false,
+		bool $preserveGiftRemoval = true,
+		bool $useOrderPrices = false
+	) {
+		if (!$shop) {
+			$shop = Context::getContext()->shop;
+		}
+
+		$quantity = (int) $quantity;
+		$id_product = (int) $id_product;
+		$id_product_attribute = (int) $id_product_attribute;
+		$id_customization = (int) $id_customization;
+		$product = new Product($id_product, false, (int) Configuration::get('PS_LANG_DEFAULT'), $shop->id);
+
+		if ($id_product_attribute) {
+			$combination = new Combination((int) $id_product_attribute);
+			if ($combination->id_product != $id_product) {
+				return false;
+			}
+		}
+
+		/* If we have a product combination, the minimal quantity is set with the one of this combination */
+		if (!empty($id_product_attribute)) {
+			$minimal_quantity = (int) ProductAttribute::getAttributeMinimalQty($id_product_attribute);
+		} else {
+			$minimal_quantity = (int) $product->minimal_quantity;
+		}
+
+		if (!Validate::isLoadedObject($product)) {
+			die(Tools::displayError(sprintf('Product with ID "%s" could not be loaded.', $id_product)));
+		}
+
+		if (isset(self::$_nbProducts[$cart->id])) {
+			unset(self::$_nbProducts[$cart->id]);
+		}
+
+		if (isset(self::$_totalWeight[$cart->id])) {
+			unset(self::$_totalWeight[$cart->id]);
+		}
+
+		$data = [
+			'cart' => $cart,
+			'product' => $product,
+			'id_product_attribute' => $id_product_attribute,
+			'id_customization' => $id_customization,
+			'quantity' => $quantity,
+			'operator' => $operator,
+			'id_address_delivery' => (int) $cart->id_address_delivery,
+			'shop' => $shop,
+			'auto_add_cart_rule' => $auto_add_cart_rule,
+		];
+
+		Hook::exec('actionCartUpdateQuantityBefore', $data);
+
+		if ((int) $quantity <= 0) {
+			return $cart->deleteProduct($id_product, $id_product_attribute, (int) $id_customization, 0, $preserveGiftRemoval, $useOrderPrices);
+		}
+
+		if (
+			!$product->available_for_order
+			|| (
+				Configuration::isCatalogMode()
+				&& !defined('_PS_ADMIN_DIR_')
+			)
+		) {
+			return false;
+		}
+
+		/* Check if the product is already in the cart */
+		$cartProductQuantity = $cart->getProductQuantity(
+			$id_product,
+			$id_product_attribute,
+			(int) $id_customization
+		);
+
+		/* Update quantity if product already exist */
+		if (!empty($cartProductQuantity['quantity'])) {
+			$productQuantity = Product::getQuantity($id_product, $id_product_attribute, null, $cart, false);
+			$availableOutOfStock = Product::isAvailableWhenOutOfStock(StockAvailable::outOfStock($product->id));
+
+			if ($operator == 'up') {
+				$updateQuantity = '+ ' . $quantity;
+				$newProductQuantity = $productQuantity - $quantity;
+
+				if ($newProductQuantity < 0 && !$availableOutOfStock && !$skipAvailabilityCheckOutOfStock) {
+					return false;
+				}
+			} elseif ($operator == 'down') {
+				$cartFirstLevelProductQuantity = $cart->getProductQuantity(
+					(int) $id_product,
+					(int) $id_product_attribute,
+					$id_customization
+				);
+				$updateQuantity = '- ' . $quantity;
+
+				if (
+					$cartFirstLevelProductQuantity['quantity'] <= 1
+					|| $cartProductQuantity['quantity'] - $quantity <= 0
+				) {
+					return $cart->deleteProduct((int) $id_product, (int) $id_product_attribute, (int) $id_customization, 0, $preserveGiftRemoval, $useOrderPrices);
+				}
+			} else {
+				return false;
+			}
+
+			Db::getInstance()->execute(
+				'UPDATE `' . _DB_PREFIX_ . 'cart_product`
+                    SET `quantity` = `quantity` ' . $updateQuantity . '
+                    WHERE `id_product` = ' . (int) $id_product .
+				' AND `id_customization` = ' . (int) $id_customization .
+				(!empty($id_product_attribute) ? ' AND `id_product_attribute` = ' . (int) $id_product_attribute : '') . '
+                    AND `id_cart` = ' . (int) $cart->id . '
+                    LIMIT 1'
+			);
+		} elseif ($operator == 'up') {
+			/* Add product to the cart */
+
+			$sql = 'SELECT stock.out_of_stock, IFNULL(stock.quantity, 0) as quantity
+                        FROM ' . _DB_PREFIX_ . 'product p
+                        ' . Product::sqlStock('p', $id_product_attribute, true, $shop) . '
+                        WHERE p.id_product = ' . $id_product;
+
+			$result2 = Db::getInstance()->getRow($sql);
+
+			// Quantity for product pack
+			if (Pack::isPack($id_product)) {
+				$result2['quantity'] = Pack::getQuantity($id_product, $id_product_attribute, null, $this, false);
+			}
+
+			if (isset($result2['out_of_stock']) && !Product::isAvailableWhenOutOfStock((int) $result2['out_of_stock']) && !$skipAvailabilityCheckOutOfStock) {
+				if ((int) $quantity > $result2['quantity']) {
+					return false;
+				}
+			}
+
+			if ((int) $quantity < $minimal_quantity) {
+				return -1;
+			}
+
+			$result_add = Db::getInstance()->insert('cart_product', [
+				'id_product' => (int) $id_product,
+				'id_product_attribute' => (int) $id_product_attribute,
+				'id_cart' => (int) $cart->id,
+				'id_address_delivery' => 0,
+				'id_shop' => $shop->id,
+				'quantity' => (int) $quantity,
+				'date_add' => date('Y-m-d H:i:s'),
+				'id_customization' => (int) $id_customization,
+			]);
+
+			if ((int) $id_customization) {
+				$result_add &= Db::getInstance()->update('customization', [
+					'id_product_attribute' => $id_product_attribute,
+					'id_address_delivery' => 0,
+					'in_cart' => 1,
+				], '`id_customization` = ' . $id_customization);
+			}
+
+			if (!$result_add) {
+				return false;
+			}
+		}
+
+		// refresh cache of self::_products
+		$cart->_products = $cart->getProducts(true);
+		$cart->update();
+		$context = Context::getContext()->cloneContext();
+		/* @phpstan-ignore-next-line */
+		$context->cart = $cart;
+		Cache::clean('getContextualValue_*');
+		CartRule::autoRemoveFromCart(null, $useOrderPrices);
+		if ($auto_add_cart_rule) {
+			CartRule::autoAddToCart($context, $useOrderPrices);
+		}
+
+		return true;
 	}
 
 
@@ -322,9 +633,13 @@ class InstapunchoutPunchoutModuleFrontController extends ModuleFrontController
 
 	private function get_cart()
 	{
+		$items = $this->context->cart->getProducts();
 		return [
 			"currency" => $this->context->currency->iso_code,
-			"items" => $this->context->cart->getProducts()
+			"items" => $items,
+			"products" => $this->search_products(array_map(function ($product) {
+				return $product['id_product'];
+			}, $items)),
 		];
 	}
 

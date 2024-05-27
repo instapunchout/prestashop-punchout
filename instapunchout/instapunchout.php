@@ -12,7 +12,7 @@ class Instapunchout extends Module
     {
         $this->name = 'instapunchout';
         $this->tab = 'front_office_features';
-        $this->version = '1.0.0';
+        $this->version = '1.0.4';
         $this->author = 'InstaPunchout';
         $this->need_instance = 0;
 
@@ -52,18 +52,19 @@ class Instapunchout extends Module
      */
     public function hookHeader(array $params)
     {
+        $base_url = Context::getContext()->shop->getBaseURL(true);
         if (method_exists($this->context->controller, 'registerJavascript')) {
             $this->context->controller->registerJavascript(
                 'punchout_header_js',
-                '/module/instapunchout/punchout?action=script',
+                $base_url . 'module/instapunchout/punchout?action=script',
                 array('server' => 'remote', 'position' => 'head', 'priority' => 140)
             );
         } else {
-            return '<script type="text/javascript" src="/module/instapunchout/punchout?action=script"></script>';
+            return '<script type="text/javascript" src="' . $base_url . 'module/instapunchout/punchout?action=script"></script>';
             /*$this->context->controller->addJS(
                 '/module/instapunchout/punchout?action=script',
                 false
-            );*/ 
+            );*/
         }
 
     }
