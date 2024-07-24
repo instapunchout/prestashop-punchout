@@ -232,6 +232,8 @@ class InstapunchoutPunchoutModuleFrontController extends ModuleFrontController
 			"carriers" => Carrier::getCarriers($this->context->language->id, true, false, false, null, Carrier::ALL_CARRIERS),
 			"order_states" => OrderState::getOrderStates($this->context->language->id),
 			"groups" => Group::getGroups($this->context->language->id),
+			"payment_modules" => PaymentModule::getInstalledPaymentModules(),
+
 		];
 		header('Content-Type: application/json');
 		echo json_encode($res);
@@ -241,306 +243,112 @@ class InstapunchoutPunchoutModuleFrontController extends ModuleFrontController
 	private function create_order($new_order)
 	{
 
-		$customer = $this->prepare_customer($new_order["customer"]);
+		try {
 
-		$order = new Order();
-		$order->id_shop = (int) $this->context->shop->id;
-		$order->id_shop_group = (int) $this->context->shop->id_shop_group;
+			$customer = $this->prepare_customer($new_order["customer"]);
 
+			$shipping_address = $this->prepare_address($new_order["shipping"], $customer);
 
-		$order->id_customer = (int) $customer->id;
+			$billing_address = $this->prepare_address($new_order["billing"], $customer);
 
-		$shipping_address = $this->prepare_address($new_order["shipping"], $customer);
-		$order->id_address_delivery = $shipping_address->id;
+			$currency_id = Currency::getIdByIsoCode($new_order['currency']);
 
-		$billing_address = $this->prepare_address($new_order["billing"], $customer);
-		$order->id_address_invoice = $billing_address->id;
+			// Get the cart
+			$cart = new Cart();
+			$cart->id_currency = $currency_id;
+			$cart->id_customer = $customer->id;
+			$cart->id_address_delivery = $shipping_address->id;
+			$cart->id_address_invoice = $billing_address->id;
+			$cart->add();
 
-		$currency_id = Currency::getIdByIsoCode($new_order['currency']);
-		$order->id_currency = (int) $currency_id;
+			// Add the order details to the cart
+			$orderDetailsData = $new_order['order_details'];
 
-		// Get the cart
-		$cart = new Cart();
-		$cart->id_currency = $currency_id;
-		$cart->id_customer = $customer->id;
-		$cart->id_address_delivery = $shipping_address->id;
-		$cart->id_address_invoice = $billing_address->id;
-		$cart->add();
-
-		// Add the order details to the cart
-		$orderDetailsData = $new_order['order_details'];
-
-		$shop = Context::getContext()->shop;
-		foreach ($orderDetailsData as $orderDetailData) {
-
-			$quantity = (int) $orderDetailData['quantity'];
-			$id_product = (int) $orderDetailData['id_product'];
-			$id_product_attribute = (int) $orderDetailData['id_product_attribute'];
-			$id_customization = (int) $orderDetailData['id_customization'];
-			$product = new Product($id_product, false, (int) Configuration::get('PS_LANG_DEFAULT'), $shop->id);
-			if (!Validate::isLoadedObject($product)) {
-				header('Content-Type: application/json');
-				echo json_encode(["error" => 'Failed to load product ' . $id_product]);
-				exit;
-			}
-			$res = $cart->updateQty($quantity, $id_product, $id_product_attribute, false, 'up', 0, null, false, true);
-			if ($res !== true) {
-				header('Content-Type: application/json');
-				echo json_encode(["error" => 'Failed to add item to cart ' . $id_product . ' with result: ' . $res]);
-				exit;
-			}
-			// $price = $orderDetailData['price'];
-			//v$cart->updatePrice($price, $orderDetailData['id_product'], $orderDetailData['id_product_attribute'], null, null, '', null, false);
-		}
-
-		$cart->update();
-
-		$this->context->cart = $cart;
-
-		$order->id_lang = (int) $this->context->cart->id_lang;
-		$order->id_cart = $cart->id;
-
-		$order->payment = 'Purchase Order';
-		$order->module = 'manual';
-
-
-		foreach ($new_order['order'] as $key => $value) {
-			$order->$key = $value;
-		}
-
-		$order->secure_key = md5(uniqid(rand(), true)); // pSQL($this->context->customer->secure_key);
-		$order->product_list = $cart->getProducts();
-
-		$result = $order->add();
-
-		if (!$result) {
-			throw new PrestaShopException('Can\'t save Order');
-		}
-
-		// Insert new Order detail list using cart for the current order
-		$order_detail = new OrderDetail(null, null, $this->context);
-		$order_detail->createList($order, $cart, $order->current_state, $order->product_list, 0, true, 1);
-
-
-		// check if isset and not empty
-		if (isset($new_order['comments']) && !empty($new_order['comments'])) {
-			$orderMessage = new Message();
-			$orderMessage->id_order = $order->id;
-			$orderMessage->message = $new_order['comments'];
-			$orderMessage->save();
-		}
-
-
-		// add order payment
-		$payment = new OrderPayment();
-		$payment->order_reference = Tools::substr($order->reference, 0, 9);
-		$payment->id_currency = $order->id_currency;
-		$payment->amount = $order->total_paid;
-		$payment->payment_method = $order->payment;
-		$payment->conversion_rate = $order->conversion_rate;
-		$payment->save();
-
-		Hook::exec('actionValidateOrder', [
-			'cart' => $cart,
-			'order' => $order,
-			'customer' => $customer,
-			'currency' => $order->id_currency,
-			'orderStatus' => $order->current_state,
-		]);
-
-		header('Content-Type: application/json');
-		echo json_encode($order);
-		exit;
-
-	}
-
-
-	public function updateQty(
-		$cart,
-		$quantity,
-		$id_product,
-		$id_product_attribute = null,
-		$id_customization = false,
-		$operator = 'up',
-		$id_address_delivery = 0,
-		Shop $shop = null,
-		$auto_add_cart_rule = true,
-		$skipAvailabilityCheckOutOfStock = false,
-		bool $preserveGiftRemoval = true,
-		bool $useOrderPrices = false
-	) {
-		if (!$shop) {
 			$shop = Context::getContext()->shop;
-		}
 
-		$quantity = (int) $quantity;
-		$id_product = (int) $id_product;
-		$id_product_attribute = (int) $id_product_attribute;
-		$id_customization = (int) $id_customization;
-		$product = new Product($id_product, false, (int) Configuration::get('PS_LANG_DEFAULT'), $shop->id);
+			define('_PS_ADMIN_DIR_', getcwd() . '/admin');
 
-		if ($id_product_attribute) {
-			$combination = new Combination((int) $id_product_attribute);
-			if ($combination->id_product != $id_product) {
-				return false;
-			}
-		}
+			foreach ($orderDetailsData as $orderDetailData) {
 
-		/* If we have a product combination, the minimal quantity is set with the one of this combination */
-		if (!empty($id_product_attribute)) {
-			$minimal_quantity = (int) ProductAttribute::getAttributeMinimalQty($id_product_attribute);
-		} else {
-			$minimal_quantity = (int) $product->minimal_quantity;
-		}
-
-		if (!Validate::isLoadedObject($product)) {
-			die(Tools::displayError(sprintf('Product with ID "%s" could not be loaded.', $id_product)));
-		}
-
-		if (isset(self::$_nbProducts[$cart->id])) {
-			unset(self::$_nbProducts[$cart->id]);
-		}
-
-		if (isset(self::$_totalWeight[$cart->id])) {
-			unset(self::$_totalWeight[$cart->id]);
-		}
-
-		$data = [
-			'cart' => $cart,
-			'product' => $product,
-			'id_product_attribute' => $id_product_attribute,
-			'id_customization' => $id_customization,
-			'quantity' => $quantity,
-			'operator' => $operator,
-			'id_address_delivery' => (int) $cart->id_address_delivery,
-			'shop' => $shop,
-			'auto_add_cart_rule' => $auto_add_cart_rule,
-		];
-
-		Hook::exec('actionCartUpdateQuantityBefore', $data);
-
-		if ((int) $quantity <= 0) {
-			return $cart->deleteProduct($id_product, $id_product_attribute, (int) $id_customization, 0, $preserveGiftRemoval, $useOrderPrices);
-		}
-
-		if (
-			!$product->available_for_order
-			|| (
-				Configuration::isCatalogMode()
-				&& !defined('_PS_ADMIN_DIR_')
-			)
-		) {
-			return false;
-		}
-
-		/* Check if the product is already in the cart */
-		$cartProductQuantity = $cart->getProductQuantity(
-			$id_product,
-			$id_product_attribute,
-			(int) $id_customization
-		);
-
-		/* Update quantity if product already exist */
-		if (!empty($cartProductQuantity['quantity'])) {
-			$productQuantity = Product::getQuantity($id_product, $id_product_attribute, null, $cart, false);
-			$availableOutOfStock = Product::isAvailableWhenOutOfStock(StockAvailable::outOfStock($product->id));
-
-			if ($operator == 'up') {
-				$updateQuantity = '+ ' . $quantity;
-				$newProductQuantity = $productQuantity - $quantity;
-
-				if ($newProductQuantity < 0 && !$availableOutOfStock && !$skipAvailabilityCheckOutOfStock) {
-					return false;
+				$quantity = (int) $orderDetailData['quantity'];
+				$id_product = (int) $orderDetailData['id_product'];
+				$id_product_attribute = (int) $orderDetailData['id_product_attribute'];
+				$id_customization = (int) $orderDetailData['id_customization'];
+				$product = new Product($id_product, false, (int) Configuration::get('PS_LANG_DEFAULT'), $shop->id);
+				if (!Validate::isLoadedObject($product)) {
+					header('Content-Type: application/json');
+					echo json_encode(["error" => 'Failed to load product ' . $id_product]);
+					exit;
 				}
-			} elseif ($operator == 'down') {
-				$cartFirstLevelProductQuantity = $cart->getProductQuantity(
-					(int) $id_product,
-					(int) $id_product_attribute,
-					$id_customization
-				);
-				$updateQuantity = '- ' . $quantity;
-
-				if (
-					$cartFirstLevelProductQuantity['quantity'] <= 1
-					|| $cartProductQuantity['quantity'] - $quantity <= 0
-				) {
-					return $cart->deleteProduct((int) $id_product, (int) $id_product_attribute, (int) $id_customization, 0, $preserveGiftRemoval, $useOrderPrices);
+				$res = $cart->updateQty($quantity, $id_product, $id_product_attribute, false, 'up', 0, null, true, true);
+				if ($res !== true) {
+					header('Content-Type: application/json');
+					echo json_encode(["error" => 'Failed to add item to cart ' . $id_product . ' with result: ' . $res]);
+					exit;
 				}
-			} else {
-				return false;
+				// $price = $orderDetailData['price'];
+				//v$cart->updatePrice($price, $orderDetailData['id_product'], $orderDetailData['id_product_attribute'], null, null, '', null, false);
 			}
 
-			Db::getInstance()->execute(
-				'UPDATE `' . _DB_PREFIX_ . 'cart_product`
-                    SET `quantity` = `quantity` ' . $updateQuantity . '
-                    WHERE `id_product` = ' . (int) $id_product .
-				' AND `id_customization` = ' . (int) $id_customization .
-				(!empty($id_product_attribute) ? ' AND `id_product_attribute` = ' . (int) $id_product_attribute : '') . '
-                    AND `id_cart` = ' . (int) $cart->id . '
-                    LIMIT 1'
+			$virtual_context = Context::getContext()->cloneContext();
+			$virtual_context->cart = $cart;
+			CartRule::autoAddToCart($virtual_context);
+
+			$cart->update();
+
+			// Calculate totals and taxes
+			$cart->getProducts(true);
+			$cart->getOrderTotal(true, Cart::BOTH);
+
+			$this->context->cart = $cart;
+
+			$order_data = [
+				'payment' => 'cheque',
+				'module' => 'cheque',
+			];
+
+			foreach ($new_order['order'] as $key => $value) {
+				$order_data[$key] = $value;
+			}
+
+			$this->context->cart->secure_key = md5(uniqid(rand(), true));
+			$payment_module = Module::getInstanceByName($order_data['module']);
+			$result = $payment_module->validateOrder(
+				(int) $cart->id,
+				Configuration::get('PS_OS_PREPARATION'), // Example order state
+				$cart->getOrderTotal(true, Cart::BOTH),
+				$order_data['payment'],
+				null,
+				array(),
+				(int) $cart->id_currency,
+				false,
+				$customer->secure_key
 			);
-		} elseif ($operator == 'up') {
-			/* Add product to the cart */
 
-			$sql = 'SELECT stock.out_of_stock, IFNULL(stock.quantity, 0) as quantity
-                        FROM ' . _DB_PREFIX_ . 'product p
-                        ' . Product::sqlStock('p', $id_product_attribute, true, $shop) . '
-                        WHERE p.id_product = ' . $id_product;
-
-			$result2 = Db::getInstance()->getRow($sql);
-
-			// Quantity for product pack
-			if (Pack::isPack($id_product)) {
-				$result2['quantity'] = Pack::getQuantity($id_product, $id_product_attribute, null, $this, false);
+			if (!$result) {
+				throw new PrestaShopException('Can\'t save Order');
 			}
 
-			if (isset($result2['out_of_stock']) && !Product::isAvailableWhenOutOfStock((int) $result2['out_of_stock']) && !$skipAvailabilityCheckOutOfStock) {
-				if ((int) $quantity > $result2['quantity']) {
-					return false;
-				}
+			$order_id = $payment_module->currentOrder;
+
+			// check if isset and not empty
+			if (isset($new_order['comments']) && !empty($new_order['comments'])) {
+				$orderMessage = new Message();
+				$orderMessage->id_order = $order_id;
+				$orderMessage->message = $new_order['comments'];
+				$orderMessage->save();
 			}
 
-			if ((int) $quantity < $minimal_quantity) {
-				return -1;
-			}
+			header('Content-Type: application/json');
+			echo json_encode(["id" => (string) $order_id]);
+			exit;
 
-			$result_add = Db::getInstance()->insert('cart_product', [
-				'id_product' => (int) $id_product,
-				'id_product_attribute' => (int) $id_product_attribute,
-				'id_cart' => (int) $cart->id,
-				'id_address_delivery' => 0,
-				'id_shop' => $shop->id,
-				'quantity' => (int) $quantity,
-				'date_add' => date('Y-m-d H:i:s'),
-				'id_customization' => (int) $id_customization,
-			]);
-
-			if ((int) $id_customization) {
-				$result_add &= Db::getInstance()->update('customization', [
-					'id_product_attribute' => $id_product_attribute,
-					'id_address_delivery' => 0,
-					'in_cart' => 1,
-				], '`id_customization` = ' . $id_customization);
-			}
-
-			if (!$result_add) {
-				return false;
-			}
+		} catch (Exception $e) {
+			header('Content-Type: application/json');
+			echo json_encode(["error" => $e->getMessage()]);
+			exit;
 		}
 
-		// refresh cache of self::_products
-		$cart->_products = $cart->getProducts(true);
-		$cart->update();
-		$context = Context::getContext()->cloneContext();
-		/* @phpstan-ignore-next-line */
-		$context->cart = $cart;
-		Cache::clean('getContextualValue_*');
-		CartRule::autoRemoveFromCart(null, $useOrderPrices);
-		if ($auto_add_cart_rule) {
-			CartRule::autoAddToCart($context, $useOrderPrices);
-		}
-
-		return true;
 	}
 
 
