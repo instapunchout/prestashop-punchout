@@ -12,7 +12,7 @@ class Instapunchout extends Module
     {
         $this->name = 'instapunchout';
         $this->tab = 'front_office_features';
-        $this->version = '1.0.4';
+        $this->version = '1.0.5';
         $this->author = 'InstaPunchout';
         $this->need_instance = 0;
 

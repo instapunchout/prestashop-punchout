@@ -248,142 +248,117 @@ class InstapunchoutPunchoutModuleFrontController extends ModuleFrontController
 	private function create_order($new_order)
 	{
 
-		try {
+		$customer = $this->prepare_customer($new_order["customer"]);
 
-			$customer = $this->prepare_customer($new_order["customer"]);
+		$order = new Order();
+		$order->id_shop = (int) $this->context->shop->id;
+		$order->id_shop_group = (int) $this->context->shop->id_shop_group;
 
-			$shipping_address = $this->prepare_address($new_order["shipping"], $customer);
 
-			$billing_address = $this->prepare_address($new_order["billing"], $customer);
+		$order->id_customer = (int) $customer->id;
 
-			$currency_id = Currency::getIdByIsoCode($new_order['currency']);
+		$shipping_address = $this->prepare_address($new_order["shipping"], $customer);
+		$order->id_address_delivery = $shipping_address->id;
 
-			// Get the cart
-			$cart = new Cart();
-			$cart->id_currency = $currency_id;
-			$cart->id_customer = $customer->id;
-			$cart->id_address_delivery = $shipping_address->id;
-			$cart->id_address_invoice = $billing_address->id;
-			$cart->add();
+		$billing_address = $this->prepare_address($new_order["billing"], $customer);
+		$order->id_address_invoice = $billing_address->id;
 
-			// Add the order details to the cart
-			$orderDetailsData = $new_order['order_details'];
+		$currency_id = Currency::getIdByIsoCode($new_order['currency']);
+		$order->id_currency = (int) $currency_id;
 
-			$shop = Context::getContext()->shop;
+		// Get the cart
+		$cart = new Cart();
+		$cart->id_currency = $currency_id;
+		$cart->id_customer = $customer->id;
+		$cart->id_address_delivery = $shipping_address->id;
+		$cart->id_address_invoice = $billing_address->id;
+		$cart->add();
 
-			define('_PS_ADMIN_DIR_', getcwd() . '/admin');
+		// Add the order details to the cart
+		$orderDetailsData = $new_order['order_details'];
 
-			foreach ($orderDetailsData as $orderDetailData) {
+		$shop = Context::getContext()->shop;
+		foreach ($orderDetailsData as $orderDetailData) {
 
-				$quantity = (int) $orderDetailData['quantity'];
-				$id_product = (int) $orderDetailData['id_product'];
-				$id_product_attribute = (int) $orderDetailData['id_product_attribute'];
-				$id_customization = (int) $orderDetailData['id_customization'];
-				$product = new Product($id_product, false, (int) Configuration::get('PS_LANG_DEFAULT'), $shop->id);
-				if (!Validate::isLoadedObject($product)) {
-					header('Content-Type: application/json');
-					echo json_encode(["error" => 'Failed to load product ' . $id_product]);
-					exit;
-				}
-				$res = $cart->updateQty($quantity, $id_product, $id_product_attribute, false, 'up', 0, null, true, true);
-				if ($res !== true) {
-					header('Content-Type: application/json');
-					echo json_encode(["error" => 'Failed to add item to cart ' . $id_product . ' with result: ' . $res]);
-					exit;
-				}
+			$quantity = (int) $orderDetailData['quantity'];
+			$id_product = (int) $orderDetailData['id_product'];
+			$id_product_attribute = (int) $orderDetailData['id_product_attribute'];
+			$id_customization = (int) $id_customization;
+			$product = new Product($id_product, false, (int) Configuration::get('PS_LANG_DEFAULT'), $shop->id);
+			if (!Validate::isLoadedObject($product)) {
+				header('Content-Type: application/json');
+				echo json_encode(["error" => 'Failed to load product ' . $id_product]);
+				exit;
 			}
-
-			$virtual_context = Context::getContext()->cloneContext();
-			$virtual_context->cart = $cart;
-			CartRule::autoAddToCart($virtual_context);
-
-			$cart->update();
-
-			// Calculate totals and taxes
-			$cart->getProducts(true);
-			$cart->getOrderTotal(true, Cart::BOTH);
-
-			$this->context->cart = $cart;
-
-			// default method
-			$order_data = [
-				'payment' => 'cheque',
-				'module' => 'cheque',
-			];
-
-			foreach ($new_order['order'] as $key => $value) {
-				$order_data[$key] = $value;
+			$res = $cart->updateQty($quantity, $id_product, $id_product_attribute, false, 'up', 0, null, false, true);
+			if ($res !== true) {
+				header('Content-Type: application/json');
+				echo json_encode(["error" => 'Failed to add item to cart ' . $id_product . ' with result: ' . $res]);
+				exit;
 			}
-
-			$this->context->cart->secure_key = md5(uniqid(rand(), true));
-			$payment_module = Module::getInstanceByName($order_data['module']);
-			$payment_module->active = true;
-
-			$this->context->cart = new Cart((int) $cart->id);
-			$paid_amout = $this->context->cart->getOrderTotal(true, Cart::BOTH);
-
-			$status = Configuration::get('PS_OS_PREPARATION');
-			if (isset($order_data['current_state'])) {
-				$status = $order_data['current_state'];
-			}
-
-			$result = $payment_module->validateOrder(
-				(int) $cart->id,
-				$status,
-				$paid_amout,
-				$order_data['payment'],
-				null,
-				array(),
-				(int) $cart->id_currency,
-				false,
-				$customer->secure_key
-			);
-
-			if (!$result) {
-				throw new PrestaShopException('Can\'t save Order');
-			}
-
-			$order_id = $payment_module->currentOrder;
-
-			// check if isset and not empty
-			if (isset($new_order['comments']) && !empty($new_order['comments'])) {
-				$orderMessage = new Message();
-				$orderMessage->id_order = $order_id;
-				$orderMessage->message = $new_order['comments'];
-				$orderMessage->save();
-			}
-
-			if (isset($new_order['order']['customer_message'])) {
-				$thread = new CustomerThread();
-				$thread->id_shop = (int) $this->context->shop->id;
-				$thread->id_lang = (int) $this->context->language->id;
-				$thread->id_contact = 0;
-				$thread->id_order = $order_id;
-				$thread->id_customer = $customer->id;
-				$thread->email = $customer->email;
-				$thread->token = Tools::passwdGen(12);
-				$thread->add();
-
-				$message = new CustomerMessage();
-				$message->id_employee = 0;
-				$message->id_customer_thread = $thread->id;
-				$message->message = $new_order['order']['customer_message'];
-				$message->private = true;
-				$message->add();
-			}
-
-			header('Content-Type: application/json');
-			echo json_encode(["id" => (string) $order_id]);
-			exit;
-
-		} catch (Exception $e) {
-			header('Content-Type: application/json');
-			echo json_encode(["error" => $e->getMessage()]);
-			exit;
 		}
 
-	}
+		$cart->update();
 
+		$this->context->cart = $cart;
+
+		$order->id_lang = (int) $this->context->cart->id_lang;
+		$order->id_cart = $cart->id;
+
+		$order->payment = 'Purchase Order';
+		$order->module = 'manual';
+
+
+		foreach ($new_order['order'] as $key => $value) {
+			$order->$key = $value;
+		}
+
+		$order->secure_key = md5(uniqid(rand(), true)); // pSQL($this->context->customer->secure_key);
+		$order->product_list = $cart->getProducts();
+
+		$result = $order->add();
+
+		if (!$result) {
+			throw new PrestaShopException('Can\'t save Order');
+		}
+
+		// Insert new Order detail list using cart for the current order
+		$order_detail = new OrderDetail(null, null, $this->context);
+		$order_detail->createList($order, $cart, $order->current_state, $order->product_list, 0, true, 1);
+
+
+		// check if isset and not empty
+		if (isset($new_order['comments']) && !empty($new_order['comments'])) {
+			$orderMessage = new Message();
+			$orderMessage->id_order = $order->id;
+			$orderMessage->message = $new_order['comments'];
+			$orderMessage->save();
+		}
+
+		if (isset($new_order['order']['customer_message'])) {
+			$thread = new CustomerThread();
+			$thread->id_shop = (int) $this->context->shop->id;
+			$thread->id_lang = (int) $this->context->language->id;
+			$thread->id_contact = 0;
+			$thread->id_order = $order_id;
+			$thread->id_customer = $customer->id;
+			$thread->email = $customer->email;
+			$thread->token = Tools::passwdGen(12);
+			$thread->add();
+
+			$message = new CustomerMessage();
+			$message->id_employee = 0;
+			$message->id_customer_thread = $thread->id;
+			$message->message = $new_order['order']['customer_message'];
+			$message->private = true;
+			$message->add();
+		}
+
+		header('Content-Type: application/json');
+		echo json_encode($order);
+		exit;
+
+	}
 
 	/**
 	 * Updates customer in the context, updates the cookie and writes the updated cookie.
@@ -459,6 +434,7 @@ class InstapunchoutPunchoutModuleFrontController extends ModuleFrontController
 		header("Cache-Control: post-check=0, pre-check=0", false);
 		header("Pragma: no-cache");
 		header('Content-Type: text/javascript');
+		echo "// " . Context::getContext()->shop->getBaseURL(true) . '\n';
 		if (!$this->context->cookie->punchout_id) {
 			exit;
 		}
@@ -474,13 +450,9 @@ class InstapunchoutPunchoutModuleFrontController extends ModuleFrontController
 
 	private function get_cart()
 	{
-		$items = $this->context->cart->getProducts();
 		return [
 			"currency" => $this->context->currency->iso_code,
-			"items" => $items,
-			"products" => $this->search_products(array_map(function ($product) {
-				return $product['id_product'];
-			}, $items)),
+			"items" => $this->context->cart->getProducts()
 		];
 	}
 
