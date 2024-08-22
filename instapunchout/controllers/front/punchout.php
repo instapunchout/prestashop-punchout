@@ -87,10 +87,15 @@ class InstapunchoutPunchoutModuleFrontController extends ModuleFrontController
 		}
 	}
 
+	// join is needed to get delivery_out_stock
 	private function search_products($ids)
 	{
+		$id_lang = $this->context->language->id;
+		$id_shop = $this->context->shop->id;
 		return Db::getInstance()->executeS(
-			"select * from " . _DB_PREFIX_ . "product where id_product in (" . join($ids, ",") . ");"
+			"select * from " . _DB_PREFIX_ . "product as product LEFT JOIN " . _DB_PREFIX_ .
+			"product_lang as lang on product.id_product = lang.id_product  where product.id_product in (" .
+			join($ids, ",") . ") and lang.id_lang = " . $id_lang . " and lang.id_shop = " . $id_shop . ";"
 		);
 	}
 
@@ -286,8 +291,6 @@ class InstapunchoutPunchoutModuleFrontController extends ModuleFrontController
 					echo json_encode(["error" => 'Failed to add item to cart ' . $id_product . ' with result: ' . $res]);
 					exit;
 				}
-				// $price = $orderDetailData['price'];
-				//v$cart->updatePrice($price, $orderDetailData['id_product'], $orderDetailData['id_product_attribute'], null, null, '', null, false);
 			}
 
 			$virtual_context = Context::getContext()->cloneContext();
@@ -302,6 +305,7 @@ class InstapunchoutPunchoutModuleFrontController extends ModuleFrontController
 
 			$this->context->cart = $cart;
 
+			// default method
 			$order_data = [
 				'payment' => 'cheque',
 				'module' => 'cheque',
@@ -313,10 +317,20 @@ class InstapunchoutPunchoutModuleFrontController extends ModuleFrontController
 
 			$this->context->cart->secure_key = md5(uniqid(rand(), true));
 			$payment_module = Module::getInstanceByName($order_data['module']);
+			$payment_module->active = true;
+
+			$this->context->cart = new Cart((int) $cart->id);
+			$paid_amout = $this->context->cart->getOrderTotal(true, Cart::BOTH);
+
+			$status = Configuration::get('PS_OS_PREPARATION');
+			if (isset($order_data['current_state'])) {
+				$status = $order_data['current_state'];
+			}
+
 			$result = $payment_module->validateOrder(
 				(int) $cart->id,
-				Configuration::get('PS_OS_PREPARATION'), // Example order state
-				$cart->getOrderTotal(true, Cart::BOTH),
+				$status,
+				$paid_amout,
 				$order_data['payment'],
 				null,
 				array(),
@@ -337,6 +351,25 @@ class InstapunchoutPunchoutModuleFrontController extends ModuleFrontController
 				$orderMessage->id_order = $order_id;
 				$orderMessage->message = $new_order['comments'];
 				$orderMessage->save();
+			}
+
+			if (isset($new_order['order']['customer_message'])) {
+				$thread = new CustomerThread();
+				$thread->id_shop = (int) $this->context->shop->id;
+				$thread->id_lang = (int) $this->context->language->id;
+				$thread->id_contact = 0;
+				$thread->id_order = $order_id;
+				$thread->id_customer = $customer->id;
+				$thread->email = $customer->email;
+				$thread->token = Tools::passwdGen(12);
+				$thread->add();
+
+				$message = new CustomerMessage();
+				$message->id_employee = 0;
+				$message->id_customer_thread = $thread->id;
+				$message->message = $new_order['order']['customer_message'];
+				$message->private = true;
+				$message->add();
 			}
 
 			header('Content-Type: application/json');
