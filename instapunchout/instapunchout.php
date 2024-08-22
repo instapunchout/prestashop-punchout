@@ -53,18 +53,20 @@ class Instapunchout extends Module
     public function hookHeader(array $params)
     {
         $base_url = Context::getContext()->shop->getBaseURL(true);
+        $script_url = "";
+        if ((bool) Configuration::get('PS_REWRITING_SETTINGS', false)) {
+            $script_url = $base_url . 'module/instapunchout/punchout?action=script';
+        } else {
+            $script_url = $base_url . 'index.php?fc=module&module=instapunchout&controller=punchout&action=script';
+        }
         if (method_exists($this->context->controller, 'registerJavascript')) {
             $this->context->controller->registerJavascript(
                 'punchout_header_js',
-                $base_url . 'module/instapunchout/punchout?action=script',
+                $script_url,
                 array('server' => 'remote', 'position' => 'head', 'priority' => 140)
             );
         } else {
-            return '<script type="text/javascript" src="' . $base_url . 'module/instapunchout/punchout?action=script"></script>';
-            /*$this->context->controller->addJS(
-                '/module/instapunchout/punchout?action=script',
-                false
-            );*/
+            return '<script type="text/javascript" src="' . $script_url . '"></script>';
         }
 
     }
