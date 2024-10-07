@@ -285,7 +285,7 @@ class InstapunchoutPunchoutModuleFrontController extends ModuleFrontController
 					echo json_encode(["error" => 'Failed to load product ' . $id_product]);
 					exit;
 				}
-				$res = $cart->updateQty($quantity, $id_product, $id_product_attribute, false, 'up', 0, null, true, true);
+				$res = $cart->updateQty($quantity, $id_product, $id_product_attribute, $id_customization, 'up', 0, null, true, true);
 				if ($res !== true) {
 					header('Content-Type: application/json');
 					echo json_encode(["error" => 'Failed to add item to cart ' . $id_product . ' with result: ' . $res]);
