@@ -95,7 +95,7 @@ class InstapunchoutPunchoutModuleFrontController extends ModuleFrontController
 		return Db::getInstance()->executeS(
 			"select * from " . _DB_PREFIX_ . "product as product LEFT JOIN " . _DB_PREFIX_ .
 			"product_lang as lang on product.id_product = lang.id_product  where product.id_product in (" .
-			join($ids, ",") . ") and lang.id_lang = " . $id_lang . " and lang.id_shop = " . $id_shop . ";"
+			join(",",$ids) . ") and lang.id_lang = " . $id_lang . " and lang.id_shop = " . $id_shop . ";"
 		);
 	}
 
